@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    image: buffer-poster-bot:latest
+    container_name: buffer-poster-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bot-data:/app/data
+
+volumes:
+  bot-data:

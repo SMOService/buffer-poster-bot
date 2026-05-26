@@ -1,0 +1,14 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+    "E501",  # line too long — long log strings are fine
+    "E701",  # `if cond: return` is idiomatic in this codebase
+    "B008",  # function-call-in-default-argument — aiogram patterns
+]
+
+[tool.ruff.lint.per-file-ignores]
+"bot.py" = ["E402"]  # imports after logging.basicConfig is intentional
