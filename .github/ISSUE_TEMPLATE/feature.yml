@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an enhancement
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Heads up:** this bot is **single-user, single-file, self-host** by design. Multi-tenant features, web UI, billing, non-Buffer providers — these belong in the commercial fork (see README → Ecosystem) and won't be merged here.
+
+        Good candidates: Buffer schema changes, new image-host fallback, new Buffer service support, ergonomics for the existing commands, better duplicate detection, scheduler tweaks.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: "Buffer added support for Bluesky — bot doesn't pick it up after /channels refresh."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

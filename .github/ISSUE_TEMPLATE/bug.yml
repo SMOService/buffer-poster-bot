@@ -1,0 +1,61 @@
+name: Bug report
+description: Something doesn't work as documented
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: "Forwarded a photo album — bot scheduled only the first photo in Buffer."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: "All 4 photos should land in a single Buffer post as a carousel."
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. /channels → enable X account
+        2. Forward an album of 3 photos from another Telegram chat
+        3. Check Buffer queue
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Bot version / commit
+      placeholder: "v1.3.0 or 1a2b3c4"
+    validations:
+      required: true
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: How is it deployed?
+      options:
+        - Railway
+        - Docker / docker-compose
+        - Coolify
+        - Bare VPS (python directly)
+        - Local dev
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Non-secret env config
+      description: e.g. SCHEDULE_MIN_HOURS, SCHEDULE_MAX_HOURS, whether IMGBB / BINANCE keys are set. **Do not paste secrets.**
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs around the failure
+      description: stderr output. Redact tokens / IDs / personal data.
+      render: text
