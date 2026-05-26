@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-05-26
+
+### Security
+- Bumped `aiohttp` from 3.10.10 to 3.13.4 to close 21 advisories
+  (1 high, 9 moderate, 11 low — CVE-2024-52303 through CVE-2026-34525).
+  All upstream library CVEs; the bot itself was not the attack surface.
+
 ## [1.3.0] — 2026-05-26
 
 Initial public release. Code was extracted from a private working copy used by
