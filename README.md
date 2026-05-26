@@ -15,9 +15,46 @@
 
 Forward a Telegram post into the bot — it picks a random `dueAt` in the configured window (default 1–240 hours / up to 10 days) and schedules the post on every enabled Buffer channel + Binance Square. Drop 50 posts at once → you have ~10 days of content auto-pacing itself across all your socials.
 
+```mermaid
+flowchart LR
+    A[You forward a post<br/>in Telegram] --> B{Album?}
+    B -- yes, 1.5s buffer --> C[Upload photos<br/>imgbb → catbox → 0x0]
+    B -- no --> C
+    C --> D[Generate random dueAt<br/>1–240h from now]
+    D --> E[Buffer GraphQL<br/>createPost]
+    D --> F[Binance queue<br/>SQLite]
+    E --> G[X / LinkedIn / Threads<br/>FB / IG / Mastodon / ...]
+    F --> H[Background scheduler<br/>tick every 60s]
+    H --> I[Binance Square<br/>OpenAPI publish]
+    I --> J[DM you the post URL]
 ```
-forward in Telegram  →  random schedule (1–240h)  →  Buffer  →  X / LinkedIn / Threads / FB / IG / …
-                                                  →  Binance Square (separate queue)
+
+### Example session
+
+```
+You ▸ [forward post: "GM ☀️ shipping a new feature today"]
+
+Bot ▸ Buffer ⏰ 23 May 2026 14:30 UTC
+        ✅ 🐦 @yourhandle
+        ✅ 💼 LinkedIn — Your Company
+        ✅ 🧵 Threads
+
+      Binance Square ⏰ 23 May 2026 14:30 UTC
+        📥 added to queue
+
+      ────────
+      "GM ☀️ shipping a new feature today"
+
+
+You ▸ /queue
+
+Bot ▸ Buffer queue:
+        🐦 @yourhandle: 12 posts
+        💼 LinkedIn:    11 posts
+        🧵 Threads:     12 posts
+
+      Binance Square: 12 posts
+        next: 22 May 2026 09:15 UTC
 ```
 
 ### Features
