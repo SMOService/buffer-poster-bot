@@ -15,9 +15,46 @@
 
 Пересылаешь пост в бота — бот выбирает случайный `dueAt` в окне `1–240 ч` и планирует публикацию на всех включённых каналах Buffer + Binance Square. Один drop из 50 постов = месяц контента вперёд.
 
+```mermaid
+flowchart LR
+    A[Форвард поста<br/>в Telegram] --> B{Альбом?}
+    B -- да, 1.5с буфер --> C[Загрузка фото<br/>imgbb → catbox → 0x0]
+    B -- нет --> C
+    C --> D[Случайный dueAt<br/>1–240 ч от now]
+    D --> E[Buffer GraphQL<br/>createPost]
+    D --> F[Очередь Binance<br/>SQLite]
+    E --> G[X / LinkedIn / Threads<br/>FB / IG / Mastodon / ...]
+    F --> H[Фоновый scheduler<br/>тик каждые 60с]
+    H --> I[Binance Square<br/>OpenAPI publish]
+    I --> J[ЛС: ссылка на пост]
 ```
-форвард в Telegram  →  случайное расписание (1–240ч)  →  Buffer  →  X / LinkedIn / Threads / FB / IG / …
-                                                       →  Binance Square (отдельная очередь)
+
+### Пример сессии
+
+```
+Ты ▸ [форвард поста: «GM ☀️ сегодня катим новую фичу»]
+
+Бот ▸ Buffer ⏰ 23 May 2026 14:30 UTC
+        ✅ 🐦 @yourhandle
+        ✅ 💼 LinkedIn — Your Company
+        ✅ 🧵 Threads
+
+      Binance Square ⏰ 23 May 2026 14:30 UTC
+        📥 добавлен в очередь
+
+      ────────
+      «GM ☀️ сегодня катим новую фичу»
+
+
+Ты ▸ /queue
+
+Бот ▸ Очередь Buffer:
+        🐦 @yourhandle: 12 постов
+        💼 LinkedIn:    11 постов
+        🧵 Threads:     12 постов
+
+      Binance Square: 12 постов
+        следующий: 22 May 2026 09:15 UTC
 ```
 
 ### Фичи
