@@ -237,7 +237,17 @@ async def publish_article(
     body_text: str,
     cover_bytes: tuple[bytes, str] | None = None,
 ) -> BinanceResult:
-    """contentType=2 article. cover необязателен."""
+    """contentType=2 article. cover необязателен.
+
+    Caveat (verified 2026-05-28): Binance Square frontend renders the `cover`
+    inconsistently on the article *detail* page when the article is published
+    through this public OpenAPI path. Same `cover` asset typically does appear
+    on profile/feed cards, but the article detail view often shows no hero
+    image for API-published articles, while native-Editor articles do render
+    one. The API call itself is correct and supported; the discrepancy lives
+    on the rendering side. Prefer `publish_image_post` (contentType=1 with
+    imageList) when you need a guaranteed visible image.
+    """
     if not BINANCE_API_KEY:
         return BinanceResult(ok=False, error="BINANCE_SQUARE_API_KEY not set")
     body: dict = {"contentType": 2, "title": title, "bodyTextOnly": body_text}
