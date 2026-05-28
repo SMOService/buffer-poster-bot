@@ -15,7 +15,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: pip
 
       - name: Install deps
@@ -28,7 +28,17 @@ jobs:
         run: ruff check .
 
       - name: Syntax check
-        run: python -m py_compile bot.py
+        run: |
+          python -m py_compile bot.py bot_instance.py config.py db.py keyboards.py scheduler.py state.py
+          python -m py_compile services/*.py handlers/*.py
+
+      - name: Import smoke test
+        env:
+          TELEGRAM_BOT_TOKEN: "0:test"
+          ALLOWED_USER_ID: "1"
+          BUFFER_ACCESS_TOKEN: "test"
+          DB_PATH: "/tmp/ci_bot.db"
+        run: python -c "import bot; print('handlers:', sum(len(o.handlers) for o in bot.dp.observers.values()))"
 
       - name: Docker build sanity
         run: docker build -t buffer-poster-bot:ci .
