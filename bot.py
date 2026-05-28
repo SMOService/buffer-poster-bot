@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Buffer Poster Bot — entry point.
 
 Личный single-user TG-бот: пересылаешь пост → автопостинг в Buffer (X / LinkedIn / Threads
@@ -13,6 +11,8 @@ from __future__ import annotations
 - handlers/           menu, channels, queue, binance, logs, post
 - scheduler.py        background Binance publisher
 """
+
+from __future__ import annotations
 
 import asyncio
 

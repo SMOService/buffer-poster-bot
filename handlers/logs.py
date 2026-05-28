@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from bot_instance import dp
 from db import history_stats, list_history
 from handlers.common import fmt_ts, is_me, is_me_cb, preview
-from keyboards import back_to_menu_row, logs_kb
+from keyboards import logs_kb
 
 PAGE_SIZE = 8
 

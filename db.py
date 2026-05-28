@@ -45,7 +45,7 @@ def init_db():
 
         v = _user_version(conn)
         if v < 1:
-            for col, ddl in [
+            for _col, ddl in [
                 ("image_urls", "ALTER TABLE binance_queue ADD COLUMN image_urls TEXT"),
                 ("content_type", "ALTER TABLE binance_queue ADD COLUMN content_type INTEGER DEFAULT 1"),
                 ("title", "ALTER TABLE binance_queue ADD COLUMN title TEXT"),

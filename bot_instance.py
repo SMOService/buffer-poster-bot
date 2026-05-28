@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Aiogram Bot/Dispatcher singletons, imported by handlers and scheduler.
 
 Кладём отдельным модулем чтобы избежать циклических импортов между
 bot.py (entry point) и handlers/services.
 """
+
+from __future__ import annotations
 
 import aiohttp
 from aiogram import Bot, Dispatcher
