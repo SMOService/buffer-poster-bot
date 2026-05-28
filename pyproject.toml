@@ -1,5 +1,5 @@
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
@@ -11,4 +11,4 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"bot.py" = ["E402"]  # imports after logging.basicConfig is intentional
+"bot.py" = ["E402", "F401"]  # imports after logging.basicConfig + side-effect handler imports
