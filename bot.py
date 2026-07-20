@@ -22,7 +22,7 @@ from bot_instance import bot, dp
 from config import BINANCE_API_KEY, logger
 from db import get_binance_queue_stats, init_db, save_channels
 from scheduler import binance_scheduler
-from services.buffer import fetch_channels
+from services.buffer import BufferAuthError, fetch_channels
 
 # import handlers for side-effect (декораторы регистрируются)
 from handlers import binance as _h_binance  # noqa: F401
@@ -47,12 +47,17 @@ async def main():
     init_db()
 
     logger.info("Loading Buffer channels...")
-    channels = await fetch_channels()
+    try:
+        channels = await fetch_channels()
+    except BufferAuthError as e:
+        channels = []
+        logger.warning("Buffer access problem: %s", e)
     if channels:
         save_channels(channels)
         logger.info("Loaded %d channels", len(channels))
     else:
-        logger.warning("Could not load channels from Buffer")
+        # сохранённые в БД каналы НЕ трогаем — постинг по ним продолжит работать
+        logger.warning("Could not load channels from Buffer (используем сохранённые)")
 
     if BINANCE_API_KEY:
         stats = get_binance_queue_stats()

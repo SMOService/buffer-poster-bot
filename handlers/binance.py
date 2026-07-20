@@ -8,16 +8,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot_instance import dp
-from config import BINANCE_USE_IMAGES, logger
 from db import (
     delete_binance_post,
     get_binance_post,
     get_binance_queue_stats,
+    get_binance_quota_hold,
     is_binance_paused,
     list_binance_queue,
-    log_history,
-    mark_binance_failed,
-    mark_binance_published,
+    purge_dead_binance,
     set_binance_paused,
     update_binance_due_at,
     update_binance_text,
@@ -35,9 +33,10 @@ from keyboards import (
     binance_post_kb,
     confirm_delete_kb,
     confirm_flush_kb,
+    confirm_purge_kb,
     edit_cancel_kb,
 )
-from services.binance import publish_image_post, publish_text
+from scheduler import publish_queued_post
 from state import EditBinance
 
 PAGE_SIZE = 8
@@ -47,7 +46,8 @@ def render_list(page: int) -> tuple[str, int]:
     offset = page * PAGE_SIZE
     rows = list_binance_queue(limit=PAGE_SIZE, offset=offset)
     stats = get_binance_queue_stats()
-    total_pages = max(1, (stats["total"] + PAGE_SIZE - 1) // PAGE_SIZE)
+    # страницы считаем по ВСЕМ строкам списка (pending+dead), иначе dead-хвост недостижим
+    total_pages = max(1, (stats["queued"] + PAGE_SIZE - 1) // PAGE_SIZE)
     now = int(datetime.now(timezone.utc).timestamp())
 
     if not rows:
@@ -55,12 +55,26 @@ def render_list(page: int) -> tuple[str, int]:
     else:
         parts: list[str] = []
         for r in rows:
-            overdue = r["publish_at"] < now
-            icon = "🔴" if overdue else "⏰"
-            tag = "🖼" if (r.get("image_file_ids") or r.get("image_urls")) else "📝"
+            st = r.get("status") or "pending"
+            nxt = r.get("next_attempt_at")
+            if st == "dead":
+                icon = "⛔"
+            elif nxt and nxt > now:
+                icon = "💤"  # в backoff / отложен
+            elif r["publish_at"] < now:
+                icon = "🔴"
+            else:
+                icon = "⏰"
+            if r.get("video_file_id"):
+                tag = "🎬"
+            elif r.get("image_file_ids") or r.get("image_urls"):
+                tag = "🖼"
+            else:
+                tag = "📝"
+            when = nxt if (nxt and nxt > r["publish_at"]) else r["publish_at"]
             head = (
-                f"<b>#{r['id']}</b> {icon} {fmt_ts(r['publish_at'])} "
-                f"<i>({fmt_delta(r['publish_at'], now)})</i> {tag}"
+                f"<b>#{r['id']}</b> {icon} {fmt_ts(when)} "
+                f"<i>({fmt_delta(when, now)})</i> {tag}"
             )
             tail = f"<i>{preview(r['text'], 100)}</i>"
             err = f"\n⚠️ <code>{preview(r['last_error'], 100)}</code>" if r.get("last_error") else ""
@@ -69,10 +83,15 @@ def render_list(page: int) -> tuple[str, int]:
 
     paused = is_binance_paused()
     status = "⏸ <b>scheduler на паузе</b>" if paused else "▶️ scheduler активен"
+    hold = get_binance_quota_hold()
+    hold_line = ""
+    if hold and hold > now:
+        hold_line = f"\n⏳ <b>quota-hold</b> до {fmt_ts(hold)} (дневной лимит Binance)"
+    dead_line = f" • ⛔ мёртвых: {stats['dead']}" if stats.get("dead") else ""
     header = (
         f"<b>🪙 Binance Square — очередь</b>\n"
-        f"{status}\n"
-        f"всего: {stats['total']} • опубликовано за 24ч: {stats['published_24h']}\n\n"
+        f"{status}{hold_line}\n"
+        f"в очереди: {stats['total']} • опубликовано за 24ч: {stats['published_24h']}{dead_line}\n\n"
     )
     return header + body, total_pages
 
@@ -117,11 +136,29 @@ async def cb_binance_list(call: CallbackQuery):
 
 
 def render_post_detail(post: dict) -> str:
-    overdue = post["publish_at"] < int(datetime.now(timezone.utc).timestamp())
-    icon = "🔴" if overdue else "⏰"
+    now = int(datetime.now(timezone.utc).timestamp())
+    st = post.get("status") or "pending"
+    nxt = post.get("next_attempt_at")
+    if st == "dead":
+        icon = "⛔"
+    elif nxt and nxt > now:
+        icon = "💤"
+    elif post["publish_at"] < now:
+        icon = "🔴"
+    else:
+        icon = "⏰"
     tag_lines: list[str] = []
+    if st == "dead":
+        tag_lines.append("⛔ <b>снят с публикации</b> (ретраи остановлены). «Изменить текст» вернёт в очередь.")
+    elif nxt and nxt > now:
+        tag_lines.append(f"💤 следующая попытка: {fmt_ts(nxt)} ({fmt_delta(nxt, now)})")
     file_ids = post.get("image_file_ids") or []
     urls = post.get("image_urls") or []
+    if post.get("video_file_id"):
+        dur = int(post.get("video_duration") or 0)
+        tag_lines.append(
+            f"🎬 видео в очереди: {dur // 60}:{dur % 60:02d} (заберётся из Telegram при публикации)"
+        )
     if file_ids:
         tag_lines.append(f"🖼 фото в очереди: {len(file_ids)} (заберутся из Telegram при публикации)")
     elif urls:
@@ -188,45 +225,9 @@ async def cb_send(call: CallbackQuery):
         pass
 
 
-async def _publish_post_now(post: dict):
-    """Inline-публикация одного поста (используется и для Send Now, и для Flush All)."""
-    from bot_instance import download_telegram_file  # local import to avoid cycle at module load
-
-    text = post["text"] or ""
-    file_ids = post.get("image_file_ids") or []
-    image_payload: list[tuple[bytes, str]] = []
-    if file_ids and BINANCE_USE_IMAGES:
-        for fid in file_ids[:4]:
-            try:
-                data, name = await download_telegram_file(fid)
-                image_payload.append((data, name))
-            except Exception as e:
-                logger.error("send_now: failed to download file_id=%s: %s", fid, e)
-
-    if image_payload:
-        result = await publish_image_post(text, image_payload)
-    else:
-        result = await publish_text(text)
-
-    if result.ok:
-        mark_binance_published(post["id"])
-        log_history(
-            kind="binance",
-            service="binance_square",
-            status="success",
-            text_preview=preview(text),
-            ext_id=result.post_id,
-            ext_url=result.url,
-        )
-    else:
-        mark_binance_failed(post["id"], result.error or "unknown")
-        log_history(
-            kind="binance",
-            service="binance_square",
-            status="failed",
-            text_preview=preview(text),
-            error=result.error,
-        )
+async def _publish_post_now(post: dict) -> str:
+    """Inline-публикация (Send Now / Flush All) — та же kind-логика, что в планировщике."""
+    return await publish_queued_post(post)
 
 
 @dp.callback_query(F.data.startswith("bq:reschedule:"))
@@ -359,6 +360,39 @@ async def cb_toggle_pause(call: CallbackQuery):
         pass
 
 
+@dp.callback_query(F.data == "bq:purge")
+async def cb_purge_confirm(call: CallbackQuery):
+    if not is_me_cb(call):
+        return
+    dead = get_binance_queue_stats().get("dead", 0)
+    if not dead:
+        await call.answer("Мёртвых постов нет", show_alert=True)
+        return
+    await call.answer()
+    await call.message.edit_text(
+        f"🧹 Удалить все <b>{dead}</b> мёртвых (снятых) постов?\n\n"
+        f"<i>Это permanent-реджекты и исчерпавшие попытки. Их публикация невозможна без правки.</i>",
+        reply_markup=confirm_purge_kb(),
+        parse_mode="HTML",
+    )
+
+
+@dp.callback_query(F.data == "bq:purge_confirm")
+async def cb_purge(call: CallbackQuery):
+    if not is_me_cb(call):
+        return
+    n = purge_dead_binance()
+    await call.answer(f"Удалено: {n}")
+    text, total_pages = render_list(0)
+    rows = list_binance_queue(limit=PAGE_SIZE, offset=0)
+    await call.message.edit_text(
+        text,
+        reply_markup=binance_list_kb(rows, 0, total_pages, is_binance_paused()),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
 @dp.callback_query(F.data == "bq:flush_all")
 async def cb_flush_confirm(call: CallbackQuery):
     if not is_me_cb(call):
@@ -381,18 +415,19 @@ async def cb_flush_run(call: CallbackQuery):
     if not is_me_cb(call):
         return
     await call.answer("⏳ Запускаю…")
-    posts = list_binance_queue(limit=200, offset=0)
+    posts = [p for p in list_binance_queue(limit=200, offset=0) if (p.get("status") or "pending") == "pending"]
     if not posts:
-        await call.message.edit_text("📭 Очередь пуста.", parse_mode="HTML")
+        await call.message.edit_text("📭 Активных постов в очереди нет.", parse_mode="HTML")
         return
     ok, fail = 0, 0
     for p in posts:
-        await _publish_post_now(p)
-        post_after = get_binance_post(p["id"])
-        if post_after and post_after["published"]:
+        outcome = await _publish_post_now(p)
+        if outcome == "ok":
             ok += 1
-        else:
+        elif outcome != "skip":  # skip = пост параллельно взял scheduler, не считаем фейлом
             fail += 1
+        if outcome in ("quota", "auth"):
+            break  # лимит/ключ — дальше бессмысленно, остальное уйдёт по расписанию
     text, total_pages = render_list(0)
     rows = list_binance_queue(limit=PAGE_SIZE, offset=0)
     await call.message.edit_text(

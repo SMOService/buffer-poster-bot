@@ -17,14 +17,18 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 async def download_telegram_file(file_id: str) -> tuple[bytes, str]:
-    """Download bytes by Telegram file_id. Returns (bytes, suggested_name)."""
+    """Download bytes by Telegram file_id. Returns (bytes, suggested_name).
+
+    Таймаут 300с: видео до 20 MB на медленном линке не влезает в 60с,
+    а обрыв по таймауту уводил бы пост в retry/dead без причины.
+    """
     file = await bot.get_file(file_id)
     file_path = file.file_path
     name = file_path.rsplit("/", 1)[-1] if file_path else f"{file_id}.jpg"
     async with aiohttp.ClientSession() as s:
         async with s.get(
             f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}",
-            timeout=aiohttp.ClientTimeout(total=60),
+            timeout=aiohttp.ClientTimeout(total=300),
         ) as r:
             data = await r.read()
     return data, name

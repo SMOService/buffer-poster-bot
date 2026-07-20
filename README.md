@@ -5,23 +5,23 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![aiogram 3.28](https://img.shields.io/badge/aiogram-3.28-blueviolet)](https://docs.aiogram.dev/)
 
-> Self-hosted Telegram bot that turns forwarded messages into scheduled cross-posts across **Buffer** (X, LinkedIn, Threads, Bluesky, Mastodon, Facebook, Instagram, …) and **Binance Square** — with randomised scheduling so a single batch fills weeks of content. Inline menu, full CRUD over the queue, publication journal.
+> Self-hosted Telegram bot that turns forwarded messages into scheduled cross-posts across **Buffer** (X, LinkedIn, Threads, Bluesky, Mastodon, Facebook, Instagram, …) and **Binance Square** — with randomised scheduling so a single batch fills weeks of content. Photos, albums, **video**, inline menu, full CRUD over the queue, publication journal.
 
 [Русская версия](README.ru.md)
 
 ---
 
-## What's new in v2.0
+## What's new in v3.0
 
-- 🪙 **Binance Square media flow** — the bot now uploads images to Binance Square via the official v2 OpenAPI (`presignedUrl` → `PUT` → `imageStatus` polling → `content/add` with `imageList`). Up to 4 photos per post, articles with a cover image supported in the SDK layer. Previously the bot dropped images on Binance and posted text only.
-- 🧭 **Inline main menu** — `/start` opens a menu (`📡 Channels / 📋 Queue / 🪙 Binance / 📊 Logs / ⚙️ Settings`); every screen has a `← Main menu` button. The plain slash commands still work as shortcuts.
-- 📊 **`/logs` journal** — paginated history of every Buffer and Binance publish attempt, with a "failures only" filter. Rotates by `HISTORY_LIMIT` (default 500).
-- ✏️ **Binance queue CRUD** — for each pending post: `📤 Send now / ✏️ Edit text / 🔁 Reschedule / 🗑 Delete` with confirm dialogs.
-- ⏸ **Pause / resume scheduler** + **⚡ Publish all now** (batch flush, with confirmation).
-- 🧩 **Modular architecture** — the old single-file `bot.py` (745 LOC) is split into `config.py / db.py / bot_instance.py / scheduler.py / state.py / keyboards.py + services/{buffer,binance,uploader}.py + handlers/{menu,channels,queue,binance,logs,post}.py`. Easier to navigate, extend, and contribute to.
-- 🗃 **Schema migrations** via `PRAGMA user_version`. Backward-compatible with v1.x databases.
+- 🎬 **Video posts on Binance Square** — forward a video (standalone or inside an album) and it publishes as a native Square video post (`contentType=3`) through the official flow: `POST /video/preSign {fileName, size} → PUT → imageStatus polling → content/add {fileTicket, cover, videoTimeSeconds}` (verified against `post-video.mjs` from binance-skills-hub). Cover is taken from the Telegram thumbnail. Videos over the Bot API's 20 MB `getFile` limit are detected up front with a clear warning instead of a doomed retry loop.
+- 🧨 **Dead-letter state machine** — permanent Binance rejects (sensitive words, length limits) and posts that exhaust their attempts stop retrying and go to `⛔ dead` (editing the text revives them). Kills the failure mode where one rejected post retried every 60s forever and burned the daily upload quota.
+- ⏳ **Exponential backoff + quota-hold** — transient errors back off 5min → ×2 → 6h cap; daily-limit errors pause publishing until 00:00 UTC with all media preserved.
+- 🖼🎬 **No media loss** — if an upload fails, the post is *not* silently degraded to text-only; it stays queued and retries with its media (old behaviour behind `BINANCE_IMAGE_FALLBACK_TEXT=1`).
+- 🔄 **Buffer new GraphQL API** — migrated to root `channels(input)` / `posts(input)` queries; auth problems now produce an actionable error instead of a silent failure.
+- 🧹 **Published-post TTL** — the queue table cleans itself after `BINANCE_PUBLISHED_TTL_DAYS` (default 30).
+- ✅ **Test suite in CI** — pytest over schema migrations, the video queue, TTL cleanup, dedup, and retry state transitions.
 
-See [`CHANGELOG.md`](CHANGELOG.md) for the full diff vs v1.3.1.
+See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ---
 
@@ -39,7 +39,7 @@ flowchart LR
     D --> F[Binance queue<br/>SQLite + Telegram file_ids]
     E --> G[X / LinkedIn / Threads<br/>Bluesky / Mastodon / FB / IG / ...]
     F --> H[Background scheduler<br/>tick every 60s]
-    H --> I[Binance Square v2<br/>presignedUrl → PUT → imageStatus → content/add]
+    H --> I[Binance Square v2<br/>presignedUrl → PUT → imageStatus → content/add<br/>images: imageList · video: fileTicket]
     I --> J[DM you the post URL]
 ```
 
@@ -88,6 +88,7 @@ Bot ▸ 👋 Buffer Poster Bot
 
 - **Random scheduling** — every forwarded post gets a randomised `dueAt`. Configurable via `SCHEDULE_MIN_HOURS` / `SCHEDULE_MAX_HOURS`.
 - **Album / carousel support** — up to 4 photos grouped into one Buffer post and one Binance Square image post.
+- **Video posts** — a forwarded video (≤20 MB, the Bot API `getFile` limit) publishes as a native Binance Square video post; Buffer still gets the text + photos.
 - **Duplicate guard** — MD5 hash of the post body, blocks re-posting the same text twice.
 - **Inline menu + CRUD** — main menu, channel toggles, queue management (edit / delete / reschedule / send now).
 - **Publication journal** — `/logs` with success + failure history, paginated, filterable.
@@ -153,7 +154,7 @@ python bot.py
 | `/binance`  | Binance Square queue with full CRUD on each post |
 | `/logs`     | Paginated journal of publish attempts (success + failures) |
 
-**To post:** just forward (or send) a message to the bot. Supported: text, photo, photo + caption, album of up to 4 photos.
+**To post:** just forward (or send) a message to the bot. Supported: text, photo, photo + caption, album of up to 4 photos, video up to 20 MB (video goes to Binance Square; Buffer receives the text + photos).
 
 ---
 
@@ -177,19 +178,20 @@ Implementation follows [binance/binance-skills-hub](https://github.com/binance/b
 
 | Step | URL | Body |
 |---|---|---|
-| 1. Presign | `POST /bapi/composite/v2/public/pgc/openApi/image/presignedUrl` | `{"imageName":"<name>.<ext>"}` → `data.presignedUrl`, `data.fileTicket` |
-| 2. Upload | `PUT <presignedUrl>` | raw bytes, `Content-Type: image/<ext>` (jpg/png/gif/webp) |
-| 3. Status | `POST /bapi/composite/v2/public/pgc/openApi/image/imageStatus` | `{"fileTicket":...}` polling 3s × 10 → `data.imageUrl` when `status==1` |
-| 4. Publish | `POST /bapi/composite/v1/public/pgc/openApi/content/add` | `{"contentType":1, "bodyTextOnly":"...", "imageList":[imageUrl, ...]}` (up to 4) |
+| 1. Presign | images: `POST /v2/…/image/presignedUrl` · video: `POST /v2/…/video/preSign` | images: `{"imageName":"<name>.<ext>"}` · video: `{"fileName", "size"}` → `data.presignedUrl`, `data.fileTicket` |
+| 2. Upload | `PUT <presignedUrl>` | raw bytes, `Content-Type: image/<ext>` or `video/<ext>` |
+| 3. Status | `POST /bapi/composite/v2/public/pgc/openApi/image/imageStatus` | `{"fileTicket":...}` polling: images 3s × 10, video 5s × 36 → `status==1` |
+| 4. Publish | `POST /bapi/composite/v1/public/pgc/openApi/content/add` | image post: `{"contentType":1, "bodyTextOnly", "imageList":[imageUrl, …]}` (up to 4) · video post: `{"contentType":3, "fileTicket", "cover", "videoTimeSeconds", "isPublish":true}` (+ `bodyTextOnly` only when text is non-empty) |
 
 All JSON requests carry `X-Square-OpenAPI-Key`, `Content-Type: application/json`, **`clienttype: binanceSkill`**.
 
 Quirks handled by `services/binance.py`:
 - HTTP 504 on `/content/add` is treated as success without a `post_id` (per official helper).
-- Known error codes (`220003/4/9/14`, `20002/13/22`) are mapped to human-readable journal entries.
-- Daily limits: **100 posts/day**, **400 uploads/day** — exceeded → `220009/220014` flagged in `/logs`.
+- Known error codes (`220003/4/9/14`, `20002/13/22`, `220095`) are mapped to human-readable journal entries and classified (`permanent`/`auth`/`quota`/`transient`) for the retry policy.
+- Daily limits: **100 posts/day**, **400 uploads/day** — exceeded → quota-hold until 00:00 UTC, media preserved.
+- **Images** go into `content/add` as processed `imageUrl`s; **video** goes as its `fileTicket` — different reference, same upload pipeline.
 
-Article-mode (`contentType=2` with a cover image) and video-mode (`contentType=3`) are implemented in the SDK layer (`publish_article`, `publish_video` helpers) but not surfaced in the UI yet — see "Roadmap" below.
+Article-mode (`contentType=2` with a cover image) is implemented in the SDK layer (`publish_article`) but not surfaced in the UI yet — see "Roadmap" below.
 
 ---
 
@@ -200,7 +202,7 @@ buffer-poster-bot/
 ├── bot.py              # entry point: init_db, load channels, start scheduler, polling
 ├── bot_instance.py     # aiogram Bot/Dispatcher singletons + download_telegram_file
 ├── config.py           # env + constants (BUFFER_API, BINANCE_API_V1/V2, …)
-├── db.py               # sqlite + migrations via PRAGMA user_version (schema v3)
+├── db.py               # sqlite + migrations via PRAGMA user_version (schema v5)
 ├── keyboards.py        # every InlineKeyboardMarkup builder
 ├── scheduler.py        # background Binance publisher (60s tick, pause-aware)
 ├── state.py            # FSM states (EditBinance.waiting_text)
@@ -214,8 +216,9 @@ buffer-poster-bot/
 │   ├── queue.py        # /queue summary
 │   ├── binance.py      # /binance + CRUD + pause/resume + flush
 │   ├── logs.py         # /logs + pagination + filter
-│   ├── post.py         # handle_post (forward → Buffer + Binance queue)
+│   ├── post.py         # handle_post (forward → Buffer + Binance queue; text/photo/album/video)
 │   └── common.py       # is_me, fmt_ts, fmt_delta, preview, random_due_at
+├── tests/              # pytest: migrations, video queue, TTL, dedup, retry states
 ├── Procfile            # Railway worker entrypoint
 ├── Dockerfile          # docker / docker-compose / Coolify / any VPS
 ├── docker-compose.yml  # ready-to-go with volume mount
@@ -227,12 +230,12 @@ buffer-poster-bot/
     └── PULL_REQUEST_TEMPLATE.md
 ```
 
-### Database (SQLite, on `/app/data/bot.db`, schema v3)
+### Database (SQLite, on `/app/data/bot.db`, schema v5)
 
 | Table | Purpose |
 |---|---|
 | `channels` | Buffer channel cache: `id`, `name`, `service`, `enabled` |
-| `binance_queue` | Pending posts: `text`, `image_urls` (JSON, imgbb), `image_file_ids` (JSON, Telegram), `content_type`, `title`, `publish_at`, `published`, `last_error`, `attempt_count` |
+| `binance_queue` | Pending posts: `text`, `image_urls` (JSON, imgbb), `image_file_ids` (JSON, Telegram), `video_file_id` / `video_cover_file_id` / `video_duration`, `content_type`, `title`, `publish_at`, `status` (`pending`/`published`/`dead`), `next_attempt_at`, `last_error`, `attempt_count` |
 | `published_hashes` | MD5 of every successfully scheduled post body (dedup guard) |
 | `post_history` | Journal: `kind` (buffer/binance), `service`, `status`, `text_preview`, `ext_id`, `ext_url`, `error` (rotates by `HISTORY_LIMIT`) |
 | `kv` | Key-value store for scheduler state (`binance_paused` etc.) |
@@ -256,10 +259,17 @@ Optional:
 ```env
 IMGBB_API_KEY=...                # recommended — primary image host for Buffer
 BINANCE_SQUARE_API_KEY=...       # enables Binance Square publishing
-BINANCE_USE_IMAGES=1             # 1 = upload to Binance v2, 0 = text-only Binance posts
+BINANCE_USE_IMAGES=1             # 1 = upload media to Binance v2, 0 = text-only Binance posts
+BINANCE_IMAGE_FALLBACK_TEXT=0    # 1 = publish text-only when a media upload fails (media is lost)
+BINANCE_MAX_ATTEMPTS=6           # attempts before a post goes to dead-letter
+BINANCE_BACKOFF_BASE_SEC=300     # retry backoff: base 5 min
+BINANCE_BACKOFF_MAX_SEC=21600    # retry backoff: cap 6 h
+BINANCE_PUBLISHED_TTL_DAYS=30    # clean published posts from the queue table after N days (0 = keep)
 SCHEDULE_MIN_HOURS=1             # default 1 (one hour)
 SCHEDULE_MAX_HOURS=240           # default 240 (ten days)
 HISTORY_LIMIT=500                # post_history rotation size
+ECOSYSTEM_LINKS_ENABLED=1        # 0 = hide the "🚀 More tools" menu section
+SUNSET_NOTICE=                   # optional banner text shown in /start
 DB_PATH=/app/data/bot.db         # override only for local dev
 ```
 
@@ -278,20 +288,27 @@ Anything Buffer supports (currently 9+ networks) just works. No code changes nee
 ## Roadmap
 
 - 📰 **Article publishing UI** — surface `contentType=2` (long-form with cover image) in the forward flow. The SDK helper `publish_article(title, body, cover)` exists; needs a `/article` command or a forward-prompt.
-- 🎬 **Video posts** — `contentType=3` is reserved in `services/binance.py`. Needs Telegram `message.video` handler + `video_file_id` queue column.
-- 🧪 **Tests** — offline smoke harness exists on the maintainer's disk, will be added to `tests/` in a follow-up.
 - 🪝 **Webhook mode** — currently polling-only; webhook mode would simplify zero-downtime deploys.
-- 🧹 **Auto-cleanup** — `binance_queue.published=1` rows live forever today; needs a TTL (e.g. 30 days).
+- 📹 **Large video support** — the 20 MB ceiling comes from Bot API `getFile`; a local Bot API server raises it to 2 GB for self-hosters who need it.
 
 ---
 
-## Ecosystem
+## Ecosystem — hosted alternatives
 
-Part of the **SMOService** posting toolchain:
+Don't want to self-host? The same team runs ready-to-use hosted bots for channel owners and content makers:
+
+| Bot | What it does |
+|---|---|
+| [@SuperappAIbot](https://t.me/SuperappAIbot?start=ref_github) | Channel management suite: cross-posting, AI composer, competitor analytics («Radar») |
+| [@BridgePostBot](https://t.me/BridgePostBot?start=ref_github) | Auto-bridge posts from Telegram to external platforms with AI rewriting |
+| [@ZavodClawbot](https://t.me/ZavodClawbot?start=ref_github) | AI content factory — generates niche posts on schedule |
+| [@TonChatAIbot](https://t.me/TonChatAIbot?start=ref_github) | AI assistant for texts, ideas and reviews |
+| [@SaveAsVideoFreebot](https://t.me/SaveAsVideoFreebot?start=ref_github) | Download videos from social networks for reposting |
+| [@StarsCashFlowbot](https://t.me/StarsCashFlowbot?start=ref_github) | Monetize your audience with Telegram Stars |
+
+Open-source neighbours in the **SMOService** org:
 
 - **[Cross-Post-Bridge-AI-bot](https://github.com/SMOService/Cross-Post-Bridge-AI-bot)** — bridges between your Telegram channels with AI rewriting, translation, and cross-posting.
-
-If you want the **commercial multi-tenant** version (multiple projects, Stars billing, Mini App, Buffer + Upload-Post + Postmypost) — it's in development. Watch this org.
 
 ---
 

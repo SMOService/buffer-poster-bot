@@ -12,7 +12,7 @@ from db import (
 )
 from handlers.common import is_me, is_me_cb
 from keyboards import channels_kb
-from services.buffer import fetch_channels
+from services.buffer import BufferAuthError, fetch_channels
 
 
 def render_channels(all_ch: list[dict]) -> str:
@@ -66,12 +66,16 @@ async def cb_toggle(call: CallbackQuery):
         return await call.answer()
     action = parts[1]
     if action == "refresh":
-        channels = await fetch_channels()
+        try:
+            channels = await fetch_channels()
+        except BufferAuthError as e:
+            await call.answer(str(e), show_alert=True)
+            return
         if channels:
             save_channels(channels)
             await call.answer(f"Обновлено: {len(channels)} каналов")
         else:
-            await call.answer("Не получилось обновить", show_alert=True)
+            await call.answer("Buffer вернул 0 каналов. Проверь подключённые каналы в Buffer.", show_alert=True)
     else:
         channel_id = parts[2] if len(parts) > 2 else ""
         if channel_id:

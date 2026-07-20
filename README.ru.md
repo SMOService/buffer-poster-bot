@@ -5,23 +5,23 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![aiogram 3.28](https://img.shields.io/badge/aiogram-3.28-blueviolet)](https://docs.aiogram.dev/)
 
-> Self-hosted Telegram-бот: пересылаешь пост — он планирует публикацию со случайным временем (1–240 ч) на всех каналах **Buffer** (X, LinkedIn, Threads, Bluesky, Mastodon, Facebook, Instagram, …) и в **Binance Square**. Закинул 50 постов = месяц контента вперёд. Inline-меню, полный CRUD над очередью, журнал публикаций.
+> Self-hosted Telegram-бот: пересылаешь пост — он планирует публикацию со случайным временем (1–240 ч) на всех каналах **Buffer** (X, LinkedIn, Threads, Bluesky, Mastodon, Facebook, Instagram, …) и в **Binance Square**. Закинул 50 постов = месяц контента вперёд. Фото, альбомы, **видео**, inline-меню, полный CRUD над очередью, журнал публикаций.
 
 [English version](README.md)
 
 ---
 
-## Что нового в v2.0
+## Что нового в v3.0
 
-- 🪙 **Binance Square media flow** — бот теперь грузит картинки в Binance Square через официальный v2 OpenAPI (`presignedUrl` → `PUT` → `imageStatus` polling → `content/add` с `imageList`). До 4 фото на пост, поддержка статей с обложкой в SDK-слое. Раньше картинки в Binance игнорировались — публиковался только текст.
-- 🧭 **Inline главное меню** — `/start` открывает меню (`📡 Каналы / 📋 Очередь / 🪙 Binance / 📊 Логи / ⚙️ Настройки`), на каждом подэкране есть кнопка `← Главное меню`. Старые слэш-команды оставлены как shortcuts.
-- 📊 **Журнал `/logs`** — пагинированная история публикаций (Buffer + Binance, success + failed) с фильтром «только фейлы». Ротация по `HISTORY_LIMIT` (default 500).
-- ✏️ **CRUD очереди Binance** — на каждом посте: `📤 Отправить сейчас / ✏️ Изменить текст / 🔁 Перепланировать / 🗑 Удалить` с confirm-диалогами.
-- ⏸ **Pause / Resume scheduler** + **⚡ Опубликовать всё сейчас** (batch flush с подтверждением).
-- 🧩 **Модульная архитектура** — старый монолит `bot.py` (745 строк) распилен на `config.py / db.py / bot_instance.py / scheduler.py / state.py / keyboards.py + services/{buffer,binance,uploader}.py + handlers/{menu,channels,queue,binance,logs,post}.py`. Проще навигироваться, расширять и контрибьютить.
-- 🗃 **Миграции БД** через `PRAGMA user_version`. Совместимо со старыми bot.db от v1.x.
+- 🎬 **Видео-посты в Binance Square** — пересланное видео (одиночное или в альбоме) публикуется как нативный видео-пост Square (`contentType=3`) через официальный flow: `POST /video/preSign {fileName, size} → PUT → imageStatus polling → content/add {fileTicket, cover, videoTimeSeconds}` (сверено с `post-video.mjs` из binance-skills-hub). Cover берётся из Telegram-превью. Видео больше лимита Bot API 20 MB (`getFile`) детектится сразу с внятным предупреждением — вместо обречённого retry-цикла.
+- 🧨 **Dead-letter state machine** — permanent-реджекты Binance (sensitive words, лимит длины) и исчерпавшие попытки посты перестают ретраиться и уходят в `⛔ dead` (правка текста воскрешает). Закрывает баг, когда один отклонённый пост ретраился каждые 60с вечно и выжигал дневную upload-квоту.
+- ⏳ **Exponential backoff + quota-hold** — transient-ошибки: 5 мин → ×2 → cap 6 ч; дневной лимит → пауза до 00:00 UTC, все медиа сохраняются.
+- 🖼🎬 **Медиа не теряются** — при сбое upload пост НЕ деградирует молча до text-only, а остаётся в очереди и ретраится С медиа (старое поведение — `BINANCE_IMAGE_FALLBACK_TEXT=1`).
+- 🔄 **Новый GraphQL API Buffer** — миграция на root-запросы `channels(input)` / `posts(input)`; проблемы авторизации теперь дают actionable-ошибку вместо тихого фейла.
+- 🧹 **TTL опубликованных** — таблица очереди чистится через `BINANCE_PUBLISHED_TTL_DAYS` (default 30).
+- ✅ **Тесты в CI** — pytest: миграции схемы, видео-очередь, TTL, dedup, retry-переходы.
 
-Полный diff vs v1.3.1 — в [`CHANGELOG.md`](CHANGELOG.md).
+Полная история — в [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -39,7 +39,7 @@ flowchart LR
     D --> F[Очередь Binance<br/>SQLite + Telegram file_ids]
     E --> G[X / LinkedIn / Threads<br/>Bluesky / Mastodon / FB / IG]
     F --> H[Фоновый scheduler<br/>тик каждые 60с]
-    H --> I[Binance Square v2<br/>presignedUrl → PUT → imageStatus → content/add]
+    H --> I[Binance Square v2<br/>presignedUrl → PUT → imageStatus → content/add<br/>фото: imageList · видео: fileTicket]
     I --> J[ЛС: ссылка на пост]
 ```
 
@@ -88,6 +88,7 @@ flowchart LR
 
 - **Случайное расписание** — каждый пост получает случайный `dueAt`. Настраивается через `SCHEDULE_MIN_HOURS` / `SCHEDULE_MAX_HOURS`.
 - **Альбомы / карусели** — до 4 фото группируются в один Buffer-пост и один Binance Square image post.
+- **Видео-посты** — пересланное видео (≤20 MB, лимит Bot API `getFile`) публикуется как нативный видео-пост Binance Square; Buffer получает текст + фото.
 - **Защита от дублей** — MD5 хэш текста, блокирует повторные публикации.
 - **Inline-меню + CRUD** — главное меню, переключение каналов, управление очередью (edit/delete/reschedule/send now).
 - **Журнал публикаций** — `/logs` с историей успехов и фейлов, пагинацией, фильтром.
@@ -153,7 +154,7 @@ python bot.py
 | `/binance`  | Очередь Binance Square с CRUD на каждом посте |
 | `/logs`     | Пагинированный журнал публикаций |
 
-**Чтобы опубликовать:** просто перешли (или отправь) сообщение в бота. Поддерживается: текст, фото, фото + подпись, альбом до 4 фото.
+**Чтобы опубликовать:** просто перешли (или отправь) сообщение в бота. Поддерживается: текст, фото, фото + подпись, альбом до 4 фото, видео до 20 MB (видео идёт в Binance Square; Buffer получает текст + фото).
 
 ---
 
@@ -177,19 +178,20 @@ python bot.py
 
 | Шаг | URL | Body |
 |---|---|---|
-| 1. Presign | `POST /bapi/composite/v2/public/pgc/openApi/image/presignedUrl` | `{"imageName":"<name>.<ext>"}` → `data.presignedUrl`, `data.fileTicket` |
-| 2. Upload | `PUT <presignedUrl>` | raw bytes, `Content-Type: image/<ext>` (jpg/png/gif/webp) |
-| 3. Status | `POST /bapi/composite/v2/public/pgc/openApi/image/imageStatus` | `{"fileTicket":...}` polling 3с × 10 → `data.imageUrl` когда `status==1` |
-| 4. Publish | `POST /bapi/composite/v1/public/pgc/openApi/content/add` | `{"contentType":1, "bodyTextOnly":"...", "imageList":[imageUrl, ...]}` (до 4) |
+| 1. Presign | фото: `POST /v2/…/image/presignedUrl` · видео: `POST /v2/…/video/preSign` | фото: `{"imageName":"<name>.<ext>"}` · видео: `{"fileName", "size"}` → `data.presignedUrl`, `data.fileTicket` |
+| 2. Upload | `PUT <presignedUrl>` | raw bytes, `Content-Type: image/<ext>` или `video/<ext>` |
+| 3. Status | `POST /bapi/composite/v2/public/pgc/openApi/image/imageStatus` | `{"fileTicket":...}` polling: фото 3с × 10, видео 5с × 36 → `status==1` |
+| 4. Publish | `POST /bapi/composite/v1/public/pgc/openApi/content/add` | image post: `{"contentType":1, "bodyTextOnly", "imageList":[imageUrl, …]}` (до 4) · video post: `{"contentType":3, "fileTicket", "cover", "videoTimeSeconds", "isPublish":true}` (+ `bodyTextOnly` только при непустом тексте) |
 
 Все JSON-запросы идут с `X-Square-OpenAPI-Key`, `Content-Type: application/json`, **`clienttype: binanceSkill`**.
 
 Quirks, которые обрабатывает `services/binance.py`:
 - HTTP 504 на `/content/add` трактуется как success без `post_id` (как в официальном helper).
-- Известные коды ошибок (`220003/4/9/14`, `20002/13/22`) переводятся в человекочитаемые записи в журнале.
-- Daily limits: **100 постов/день**, **400 uploads/день** — превышение → `220009/220014` в `/logs`.
+- Известные коды ошибок (`220003/4/9/14`, `20002/13/22`, `220095`) переводятся в человекочитаемые записи и классифицируются (`permanent`/`auth`/`quota`/`transient`) для retry-политики.
+- Daily limits: **100 постов/день**, **400 uploads/день** — превышение → quota-hold до 00:00 UTC, медиа сохраняются.
+- **Фото** уходят в `content/add` как processed `imageUrl`; **видео** — как его `fileTicket`: разные ссылки, один upload-конвейер.
 
-Article-mode (`contentType=2` со cover) и video-mode (`contentType=3`) — есть в SDK-слое (`publish_article`, `publish_video`), но UI ещё не сделан, см. Roadmap.
+Article-mode (`contentType=2` со cover) — есть в SDK-слое (`publish_article`), но UI ещё не сделан, см. Roadmap.
 
 ---
 
@@ -200,7 +202,7 @@ buffer-poster-bot/
 ├── bot.py              # entry point: init_db, загрузка каналов, start scheduler, polling
 ├── bot_instance.py     # aiogram Bot/Dispatcher singletons + download_telegram_file
 ├── config.py           # env + constants (BUFFER_API, BINANCE_API_V1/V2, …)
-├── db.py               # sqlite + миграции через PRAGMA user_version (schema v3)
+├── db.py               # sqlite + миграции через PRAGMA user_version (schema v5)
 ├── keyboards.py        # все builders InlineKeyboardMarkup
 ├── scheduler.py        # background Binance publisher (60s тик, pause-aware)
 ├── state.py            # FSM states (EditBinance.waiting_text)
@@ -214,8 +216,9 @@ buffer-poster-bot/
 │   ├── queue.py        # /queue summary
 │   ├── binance.py      # /binance + CRUD + pause/resume + flush
 │   ├── logs.py         # /logs + пагинация + фильтр
-│   ├── post.py         # handle_post (forward → Buffer + Binance queue)
+│   ├── post.py         # handle_post (forward → Buffer + Binance queue; текст/фото/альбом/видео)
 │   └── common.py       # is_me, fmt_ts, fmt_delta, preview, random_due_at
+├── tests/              # pytest: миграции, видео-очередь, TTL, dedup, retry-переходы
 ├── Procfile            # Railway worker entrypoint
 ├── Dockerfile          # docker / docker-compose / Coolify / любой VPS
 ├── docker-compose.yml  # готовый с volume mount
@@ -227,12 +230,12 @@ buffer-poster-bot/
     └── PULL_REQUEST_TEMPLATE.md
 ```
 
-### БД (SQLite, `/app/data/bot.db`, schema v3)
+### БД (SQLite, `/app/data/bot.db`, schema v5)
 
 | Таблица | Назначение |
 |---|---|
 | `channels` | Кэш каналов Buffer: `id`, `name`, `service`, `enabled` |
-| `binance_queue` | Pending посты: `text`, `image_urls` (JSON, imgbb), `image_file_ids` (JSON, Telegram), `content_type`, `title`, `publish_at`, `published`, `last_error`, `attempt_count` |
+| `binance_queue` | Pending посты: `text`, `image_urls` (JSON, imgbb), `image_file_ids` (JSON, Telegram), `video_file_id` / `video_cover_file_id` / `video_duration`, `content_type`, `title`, `publish_at`, `status` (`pending`/`published`/`dead`), `next_attempt_at`, `last_error`, `attempt_count` |
 | `published_hashes` | MD5 каждого опубликованного поста (dedup) |
 | `post_history` | Журнал: `kind` (buffer/binance), `service`, `status`, `text_preview`, `ext_id`, `ext_url`, `error` (ротация по `HISTORY_LIMIT`) |
 | `kv` | Key-value хранилище для состояния scheduler'а (`binance_paused` etc.) |
@@ -256,10 +259,17 @@ BUFFER_ACCESS_TOKEN=1/abc...
 ```env
 IMGBB_API_KEY=...                # рекомендую — primary image host для Buffer
 BINANCE_SQUARE_API_KEY=...       # включает Binance Square
-BINANCE_USE_IMAGES=1             # 1 = грузить в Binance v2, 0 = text-only посты в Binance
+BINANCE_USE_IMAGES=1             # 1 = грузить медиа в Binance v2, 0 = text-only посты в Binance
+BINANCE_IMAGE_FALLBACK_TEXT=0    # 1 = публиковать text-only при сбое upload (медиа теряется)
+BINANCE_MAX_ATTEMPTS=6           # попыток до dead-letter
+BINANCE_BACKOFF_BASE_SEC=300     # backoff: база 5 мин
+BINANCE_BACKOFF_MAX_SEC=21600    # backoff: cap 6 ч
+BINANCE_PUBLISHED_TTL_DAYS=30    # чистить опубликованные из очереди через N дней (0 = хранить)
 SCHEDULE_MIN_HOURS=1             # default 1
 SCHEDULE_MAX_HOURS=240           # default 240 (10 дней)
 HISTORY_LIMIT=500                # ротация post_history
+ECOSYSTEM_LINKS_ENABLED=1        # 0 = скрыть раздел «🚀 Ещё инструменты»
+SUNSET_NOTICE=                   # текст плашки-объявления в /start (пусто = нет)
 DB_PATH=/app/data/bot.db         # override только для local dev
 ```
 
@@ -278,20 +288,27 @@ DB_PATH=/app/data/bot.db         # override только для local dev
 ## Roadmap
 
 - 📰 **Article publishing UI** — surface `contentType=2` (long-form со cover) в forward-flow. SDK-хелпер `publish_article(title, body, cover)` уже есть; нужна команда `/article` или forward-prompt.
-- 🎬 **Video posts** — `contentType=3` зарезервирован в `services/binance.py`. Нужен `message.video` handler + колонка `video_file_id` в очереди.
-- 🧪 **Tests** — offline smoke harness существует на диске maintainer'а, переедет в `tests/` в следующем релизе.
 - 🪝 **Webhook mode** — сейчас только polling; webhook упростит zero-downtime деплои.
-- 🧹 **Auto-cleanup** — `binance_queue.published=1` строки сейчас живут вечно; нужен TTL (например 30 дней).
+- 📹 **Большие видео** — потолок 20 MB задаёт Bot API `getFile`; локальный Bot API server поднимает его до 2 GB для self-host'еров, которым нужно.
 
 ---
 
-## Экосистема
+## Экосистема — hosted-альтернативы
 
-Часть **SMOService** posting toolchain:
+Не хочешь self-host? Та же команда делает готовые hosted-боты для владельцев каналов и контент-мейкеров:
+
+| Бот | Что делает |
+|---|---|
+| [@SuperappAIbot](https://t.me/SuperappAIbot?start=ref_github) | Ведение каналов: кросспостинг, AI-композер, аналитика конкурентов («Радар») |
+| [@BridgePostBot](https://t.me/BridgePostBot?start=ref_github) | Автоперенос постов из Telegram на внешние площадки с AI-рерайтом |
+| [@ZavodClawbot](https://t.me/ZavodClawbot?start=ref_github) | AI-фабрика контента — генерация постов под нишу по расписанию |
+| [@TonChatAIbot](https://t.me/TonChatAIbot?start=ref_github) | AI-ассистент для текстов, идей и разборов |
+| [@SaveAsVideoFreebot](https://t.me/SaveAsVideoFreebot?start=ref_github) | Скачивание видео из соцсетей для репостов |
+| [@StarsCashFlowbot](https://t.me/StarsCashFlowbot?start=ref_github) | Монетизация аудитории через Telegram Stars |
+
+Open-source соседи в org **SMOService**:
 
 - **[Cross-Post-Bridge-AI-bot](https://github.com/SMOService/Cross-Post-Bridge-AI-bot)** — мосты между твоими Telegram-каналами с AI-rewriting, переводом и cross-posting'ом.
-
-Если хочется **коммерческой multi-tenant** версии (несколько проектов, Stars billing, Mini App, Buffer + Upload-Post + Postmypost) — она в разработке. Следи за этой org.
 
 ---
 

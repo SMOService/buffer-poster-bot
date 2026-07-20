@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from config import SERVICE_EMOJI
+from config import ECOSYSTEM_LINKS_ENABLED, SERVICE_EMOJI
 
 
 def kb(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
@@ -10,7 +10,7 @@ def kb(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    return kb([
+    rows = [
         [
             InlineKeyboardButton(text="📡 Каналы", callback_data="menu:channels"),
             InlineKeyboardButton(text="📋 Очередь", callback_data="menu:queue"),
@@ -23,7 +23,10 @@ def main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
             InlineKeyboardButton(text="🔁 Обновить", callback_data="menu:home"),
         ],
-    ])
+    ]
+    if ECOSYSTEM_LINKS_ENABLED:
+        rows.append([InlineKeyboardButton(text="🚀 Ещё инструменты", callback_data="menu:ecosystem")])
+    return kb(rows)
 
 
 def back_to_menu_row() -> list[InlineKeyboardButton]:
@@ -68,6 +71,9 @@ def binance_list_kb(rows: list[dict], page: int, total_pages: int, paused: bool)
         InlineKeyboardButton(text=toggle_label, callback_data="bq:toggle_pause"),
         InlineKeyboardButton(text="⚡ Опубликовать все", callback_data="bq:flush_all"),
     ])
+    kb_rows.append([
+        InlineKeyboardButton(text="🧹 Очистить мёртвые", callback_data="bq:purge"),
+    ])
     kb_rows.append(back_to_menu_row())
     return kb(kb_rows)
 
@@ -97,6 +103,15 @@ def confirm_flush_kb() -> InlineKeyboardMarkup:
     return kb([
         [
             InlineKeyboardButton(text="✅ Да, отправить все", callback_data="bq:flush_all_confirm"),
+            InlineKeyboardButton(text="✖️ Отмена", callback_data="menu:binance:0"),
+        ],
+    ])
+
+
+def confirm_purge_kb() -> InlineKeyboardMarkup:
+    return kb([
+        [
+            InlineKeyboardButton(text="🧹 Да, очистить", callback_data="bq:purge_confirm"),
             InlineKeyboardButton(text="✖️ Отмена", callback_data="menu:binance:0"),
         ],
     ])

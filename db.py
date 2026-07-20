@@ -5,9 +5,9 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from config import DB_PATH, HISTORY_LIMIT
+from config import BINANCE_MAX_ATTEMPTS, DB_PATH, HISTORY_LIMIT
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 def get_conn():
@@ -86,6 +86,47 @@ def init_db():
                 pass
             conn.commit()
             _set_user_version(conn, 3)
+        if v < 4:
+            # dead-letter state machine: status pending|published|dead + backoff next_attempt_at
+            for ddl in (
+                "ALTER TABLE binance_queue ADD COLUMN status TEXT DEFAULT 'pending'",
+                "ALTER TABLE binance_queue ADD COLUMN next_attempt_at INTEGER",
+            ):
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
+            # backfill из старого published-флага
+            conn.execute("UPDATE binance_queue SET status='published' WHERE published=1")
+            # глушим зомби: то что уже било лимит попыток — сразу в dead (стоп бесконечному ретраю)
+            conn.execute(
+                "UPDATE binance_queue SET status='dead' "
+                "WHERE published=0 AND COALESCE(attempt_count,0) >= ?",
+                (BINANCE_MAX_ATTEMPTS,),
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON binance_queue(status, publish_at)")
+            conn.commit()
+            _set_user_version(conn, 4)
+        if v < 5:
+            # video posts (contentType=3, файл забирается из Telegram при публикации)
+            # + published_at для честного TTL опубликованных
+            for ddl in (
+                "ALTER TABLE binance_queue ADD COLUMN video_file_id TEXT",
+                "ALTER TABLE binance_queue ADD COLUMN video_cover_file_id TEXT",
+                "ALTER TABLE binance_queue ADD COLUMN video_duration INTEGER",
+                "ALTER TABLE binance_queue ADD COLUMN published_at INTEGER",
+            ):
+                try:
+                    conn.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass
+            conn.commit()
+            _set_user_version(conn, 5)
+
+        # crash-recovery: посты, застрявшие в transient-статусе 'publishing'
+        # (процесс умер посреди публикации) — вернуть в pending
+        conn.execute("UPDATE binance_queue SET status='pending' WHERE status='publishing'")
+        conn.commit()
 
 
 # ── kv ────────────────────────────────────────────────────────────────────────
@@ -118,6 +159,18 @@ def is_binance_paused() -> bool:
 
 def set_binance_paused(paused: bool):
     kv_set("binance_paused", bool(paused))
+
+
+def get_binance_quota_hold() -> int:
+    """Unix-время, до которого публикация на паузе из-за дневного лимита Binance (0 = нет)."""
+    try:
+        return int(kv_get("binance_quota_hold_until", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_binance_quota_hold(until_unix: int):
+    kv_set("binance_quota_hold_until", int(until_unix))
 
 
 # ── dedup hashes ──────────────────────────────────────────────────────────────
@@ -189,6 +242,9 @@ def add_to_binance_queue(
     content_type: int = 1,
     title: str | None = None,
     image_file_ids: list[str] | None = None,
+    video_file_id: str | None = None,
+    video_cover_file_id: str | None = None,
+    video_duration: int | None = None,
 ) -> int:
     dt = datetime.fromisoformat(due_at_iso.replace("Z", "+00:00"))
     publish_at = int(dt.timestamp())
@@ -198,9 +254,11 @@ def add_to_binance_queue(
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO binance_queue "
-            "(text, image_url, image_urls, image_file_ids, content_type, title, publish_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (text, legacy_image, image_urls_json, image_file_ids_json, content_type, title, publish_at),
+            "(text, image_url, image_urls, image_file_ids, content_type, title, publish_at, "
+            "video_file_id, video_cover_file_id, video_duration) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (text, legacy_image, image_urls_json, image_file_ids_json, content_type, title, publish_at,
+             video_file_id, video_cover_file_id, video_duration),
         )
         conn.commit()
         return int(cur.lastrowid)
@@ -236,8 +294,11 @@ def get_pending_binance_posts() -> list[dict]:
     now = int(datetime.now(timezone.utc).timestamp())
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM binance_queue WHERE published=0 AND publish_at<=? ORDER BY publish_at",
-            (now,),
+            "SELECT * FROM binance_queue "
+            "WHERE status='pending' AND publish_at<=? "
+            "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
+            "ORDER BY publish_at",
+            (now, now),
         ).fetchall()
     out = []
     for r in rows:
@@ -262,7 +323,9 @@ def get_binance_post(post_id: int) -> dict | None:
 def list_binance_queue(limit: int = 10, offset: int = 0) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM binance_queue WHERE published=0 ORDER BY publish_at LIMIT ? OFFSET ?",
+            "SELECT * FROM binance_queue WHERE status!='published' "
+            "ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, publish_at "
+            "LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
     out = []
@@ -274,19 +337,117 @@ def list_binance_queue(limit: int = 10, offset: int = 0) -> list[dict]:
     return out
 
 
-def mark_binance_published(post_id: int):
+def claim_binance_post(post_id: int) -> bool:
+    """Атомарный захват поста на публикацию: pending|dead → publishing.
+
+    Закрывает гонку scheduler-тика с ручным «Отправить сейчас»/«Опубликовать все»
+    (double-publish). dead разрешён — ручной «Отправить сейчас» = явный ретрай.
+    Возвращает False, если пост уже захвачен другим публикатором или published.
+    """
     with get_conn() as conn:
-        conn.execute("UPDATE binance_queue SET published=1 WHERE id=?", (post_id,))
+        cur = conn.execute(
+            "UPDATE binance_queue SET status='publishing' "
+            "WHERE id=? AND status IN ('pending','dead')",
+            (post_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def release_binance_post(post_id: int, next_attempt_at: int | None = None):
+    """publishing → pending (без attempt++): quota/auth-hold текущего поста."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE binance_queue SET status='pending', next_attempt_at=? "
+            "WHERE id=? AND status='publishing'",
+            (next_attempt_at, post_id),
+        )
         conn.commit()
 
 
-def mark_binance_failed(post_id: int, error: str):
+def mark_binance_published(post_id: int):
+    now = int(datetime.now(timezone.utc).timestamp())
     with get_conn() as conn:
         conn.execute(
-            "UPDATE binance_queue SET last_error=?, attempt_count=COALESCE(attempt_count,0)+1 WHERE id=?",
+            "UPDATE binance_queue SET status='published', published=1, published_at=? WHERE id=?",
+            (now, post_id),
+        )
+        conn.commit()
+
+
+def mark_binance_dead(post_id: int, error: str):
+    """Permanent/exhausted — снять с ретрая навсегда."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE binance_queue SET status='dead', last_error=?, "
+            "attempt_count=COALESCE(attempt_count,0)+1 WHERE id=?",
             (error[:500], post_id),
         )
         conn.commit()
+
+
+def mark_binance_retry(post_id: int, error: str, next_attempt_at: int):
+    """Transient — вернуть в pending (из publishing), отложить следующую попытку (backoff)."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE binance_queue SET status='pending', last_error=?, next_attempt_at=?, "
+            "attempt_count=COALESCE(attempt_count,0)+1 WHERE id=? AND status!='published'",
+            (error[:500], next_attempt_at, post_id),
+        )
+        conn.commit()
+
+
+def defer_pending_binance(next_attempt_at: int) -> int:
+    """Quota-hold: отодвинуть все ДОСТУПНЫЕ pending-посты до next_attempt_at (без attempt++)."""
+    now = int(datetime.now(timezone.utc).timestamp())
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE binance_queue SET next_attempt_at=? "
+            "WHERE status='pending' AND publish_at<=? "
+            "AND (next_attempt_at IS NULL OR next_attempt_at<?)",
+            (next_attempt_at, now, next_attempt_at),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def cleanup_published_binance(ttl_days: int) -> int:
+    """Опубликованные посты старше TTL удаляются — иначе binance_queue растёт вечно.
+
+    TTL считается от МОМЕНТА ПУБЛИКАЦИИ (published_at), не от created_at: пост,
+    долго ждавший в backoff, не должен удаляться сразу после успеха. Для строк,
+    опубликованных до появления published_at (schema <5), — fallback на created_at.
+    """
+    if ttl_days <= 0:
+        return 0
+    cutoff = int(datetime.now(timezone.utc).timestamp()) - ttl_days * 86400
+    with get_conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM binance_queue WHERE status='published' "
+            "AND COALESCE(published_at, created_at)<?",
+            (cutoff,),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def purge_dead_binance() -> int:
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM binance_queue WHERE status='dead'")
+        conn.commit()
+        return cur.rowcount
+
+
+def revive_binance_post(post_id: int) -> bool:
+    """Dead → pending (после правки текста), сбросить backoff/счётчик."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE binance_queue SET status='pending', next_attempt_at=NULL, "
+            "attempt_count=0, last_error=NULL WHERE id=? AND status='dead'",
+            (post_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
 
 
 def delete_binance_post(post_id: int) -> bool:
@@ -297,8 +458,17 @@ def delete_binance_post(post_id: int) -> bool:
 
 
 def update_binance_text(post_id: int, text: str) -> bool:
+    """Правка текста: сбрасывает dead → pending и backoff (часто правят, чтобы починить permanent-реджект).
+
+    publishing не трогаем — иначе in-flight пост снова станет виден публикаторам
+    (double-publish). Пока пост публикуется, правка вернёт False.
+    """
     with get_conn() as conn:
-        cur = conn.execute("UPDATE binance_queue SET text=? WHERE id=? AND published=0", (text, post_id))
+        cur = conn.execute(
+            "UPDATE binance_queue SET text=?, status='pending', next_attempt_at=NULL, "
+            "attempt_count=0, last_error=NULL WHERE id=? AND status IN ('pending','dead')",
+            (text, post_id),
+        )
         conn.commit()
     return cur.rowcount > 0
 
@@ -306,7 +476,7 @@ def update_binance_text(post_id: int, text: str) -> bool:
 def update_binance_due_at(post_id: int, publish_at_unix: int) -> bool:
     with get_conn() as conn:
         cur = conn.execute(
-            "UPDATE binance_queue SET publish_at=? WHERE id=? AND published=0",
+            "UPDATE binance_queue SET publish_at=?, next_attempt_at=NULL WHERE id=? AND status!='published'",
             (publish_at_unix, post_id),
         )
         conn.commit()
@@ -314,17 +484,28 @@ def update_binance_due_at(post_id: int, publish_at_unix: int) -> bool:
 
 
 def get_binance_queue_stats() -> dict:
+    now = int(datetime.now(timezone.utc).timestamp())
     with get_conn() as conn:
-        total = conn.execute("SELECT COUNT(*) as c FROM binance_queue WHERE published=0").fetchone()["c"]
+        total = conn.execute(
+            "SELECT COUNT(*) as c FROM binance_queue WHERE status='pending'"
+        ).fetchone()["c"]
+        dead = conn.execute(
+            "SELECT COUNT(*) as c FROM binance_queue WHERE status='dead'"
+        ).fetchone()["c"]
+        queued = conn.execute(
+            "SELECT COUNT(*) as c FROM binance_queue WHERE status!='published'"
+        ).fetchone()["c"]
         next_row = conn.execute(
-            "SELECT publish_at FROM binance_queue WHERE published=0 ORDER BY publish_at LIMIT 1"
+            "SELECT publish_at FROM binance_queue WHERE status='pending' ORDER BY publish_at LIMIT 1"
         ).fetchone()
         published_24h = conn.execute(
-            "SELECT COUNT(*) as c FROM binance_queue WHERE published=1 AND created_at>=?",
-            (int(datetime.now(timezone.utc).timestamp()) - 86400,),
+            "SELECT COUNT(*) as c FROM binance_queue WHERE status='published' AND created_at>=?",
+            (now - 86400,),
         ).fetchone()["c"]
     return {
         "total": total,
+        "dead": dead,
+        "queued": queued,  # всё, что показывает list_binance_queue (pending+dead+publishing)
         "next_at": next_row["publish_at"] if next_row else None,
         "published_24h": published_24h,
     }

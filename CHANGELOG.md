@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-07-20
+
+Major release: **video posts on Binance Square** + reliability hardening that shipped in the upstream production bot since 2.0.0.
+
+**Why 3.0:** the `binance_queue` state machine changed (`status` column: `pending|published|dead` + `next_attempt_at`, schema v4→v5) and the Buffer integration moved to Buffer's new root-query GraphQL API. Migrations are automatic and backward-compatible, but retry behaviour and the Buffer API surface differ from 2.x.
+
+### Added
+
+- 🎬 **Video posts on Binance Square** (`contentType=3`) — forward a video (standalone or inside an album) and it publishes through the official flow: `POST /video/preSign {fileName, size}` → `PUT` bytes → `imageStatus` polling (5s × 36, video processing is slower than images) → `content/add` with `{fileTicket, cover, videoTimeSeconds, isPublish}` (+ `bodyTextOnly` only when the caption is non-empty), verified against `post-video.mjs` from `binance-skills-hub`. The cover is taken from the Telegram video thumbnail. Previously video messages were silently dropped by the handler filter.
+  - **20 MB guard** — Telegram Bot API `getFile` refuses files over 20 MB; the bot warns you up front and posts without the video instead of retrying forever.
+  - Same no-loss policy as images: if the video upload fails, the post is **not** silently degraded to text-only — it stays queued and retries with the video (legacy behaviour behind `BINANCE_IMAGE_FALLBACK_TEXT=1`).
+  - Schema **v5**: `video_file_id`, `video_cover_file_id`, `video_duration` on `binance_queue`; video bytes are fetched from Telegram at publish time (saves Binance upload quota).
+- 🔒 **Anti-double-publish** — atomic post claim (`pending|dead → publishing`) closes the race between the scheduler tick and manual `Send now` / `Publish all`; crash recovery resets stuck `publishing` rows to `pending` on startup.
+- 🧨 **Dead-letter state machine** — permanent rejects (sensitive words, length limit) and posts that exhaust `BINANCE_MAX_ATTEMPTS` (default 6) go to `dead` instead of retrying every 60s forever. Editing the text revives a dead post.
+- 🧭 **Error classification** (`permanent` / `auth` / `quota` / `transient`) drives the retry policy; exponential backoff 5min → ×2 → cap 6h.
+- 🚦 **Quota-hold** — on Binance daily-limit errors (`220009`/`220014`) publishing pauses until 00:00 UTC and queued media is preserved.
+- 🧹 **Published-post TTL** — published posts are cleaned from `binance_queue` after `BINANCE_PUBLISHED_TTL_DAYS` (default 30, `0` disables), measured from the actual publish time (`published_at`), so the table stops growing forever.
+- 🚀 **Ecosystem section** — optional main-menu screen linking hosted bots of the same family (disable with `ECOSYSTEM_LINKS_ENABLED=0`).
+- 📣 **`SUNSET_NOTICE`** env — show a migration/announcement banner in `/start` without touching code.
+- ✅ **Test suite** — `tests/` (pytest): schema migration v4→v5, video queue round-trip, TTL cleanup, dedup hashes, backoff/dead/revive. Wired into CI.
+- New env vars: `BINANCE_MAX_ATTEMPTS`, `BINANCE_BACKOFF_BASE_SEC`, `BINANCE_BACKOFF_MAX_SEC`, `BINANCE_IMAGE_FALLBACK_TEXT`, `BINANCE_PUBLISHED_TTL_DAYS`, `ECOSYSTEM_LINKS_ENABLED`, `SUNSET_NOTICE`.
+
+### Changed
+
+- **Buffer new GraphQL API** — migrated to root `channels(input)` / `posts(input)` queries with organization ids; `assets` is now a required `[AssetInput!]!` list. A `FORBIDDEN` on channels raises a clear, actionable error (subscription / Personal Key permissions) instead of failing silently, and saved channels keep working for posting.
+- `/binance` queue UI shows per-post state: `⛔ dead` / `💤 backoff` / `⏳ quota-hold`, attempt counts, last error; `🧹 Purge dead` button; 🎬/🖼/📝 media tags.
+- Success notifications include what was attached (photo count or video).
+- Logger name normalised to `buffer-poster`.
+
+### Fixed
+
+- Permanent Binance rejects no longer burn the daily upload quota by retrying forever (the original bug showed `attempt_count=24018` on a single post).
+- A failed image upload no longer silently publishes the post as bare text — media is never lost.
+
 ## [2.0.0] — 2026-05-28
 
 Major release: architecture overhaul + Binance Square media flow.

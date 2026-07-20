@@ -10,6 +10,7 @@ from config import (
     SCHEDULE_MAX_HOURS,
     SCHEDULE_MIN_HOURS,
     SERVICE_EMOJI,
+    SUNSET_NOTICE,
 )
 from db import (
     get_binance_queue_stats,
@@ -18,7 +19,7 @@ from db import (
     is_binance_paused,
 )
 from handlers.common import fmt_ts, is_me, is_me_cb
-from keyboards import main_menu, settings_kb
+from keyboards import back_to_menu_row, kb, main_menu, settings_kb
 
 
 def render_home() -> str:
@@ -41,7 +42,9 @@ def render_home() -> str:
     hs = history_stats()
     hist_line = f"📊 история: {hs['ok']} ✅ / {hs['fail']} ❌ (всего {hs['total']})"
 
+    sunset = f"📣 <b>{SUNSET_NOTICE}</b>\n\n" if SUNSET_NOTICE else ""
     return (
+        f"{sunset}"
         f"👋 <b>Buffer Poster Bot</b>\n\n"
         f"<b>Активных каналов Buffer ({len(channels)}):</b>\n{ch_lines}\n\n"
         f"<b>Binance Square:</b> {binance_status}\n"
@@ -98,6 +101,42 @@ async def cb_settings(call: CallbackQuery):
         reply_markup=settings_kb(is_binance_paused()),
         parse_mode="HTML",
     )
+
+
+# Инструменты той же аудитории (админы каналов / контент-мейкеры).
+# Deep links с ref-меткой — принимающие боты логируют start-payload, конверсии измеримы.
+ECOSYSTEM_TEXT = (
+    "🚀 <b>Ещё инструменты для контента</b>\n\n"
+    "📣 <a href=\"https://t.me/SuperappAIbot?start=ref_bufferposter\">Superapp AI</a> — "
+    "ведение каналов: кросспостинг, AI-композер, аналитика «Радар»\n\n"
+    "🌉 <a href=\"https://t.me/BridgePostBot?start=ref_bufferposter\">BridgePost</a> — "
+    "автоперенос постов из Telegram на внешние площадки с AI-рерайтом\n\n"
+    "🏭 <a href=\"https://t.me/ZavodClawbot?start=ref_bufferposter\">ZavodClaw</a> — "
+    "AI-фабрика контента: генерация постов под твою нишу\n\n"
+    "🤖 <a href=\"https://t.me/TonChatAIbot?start=ref_bufferposter\">TonChat AI</a> — "
+    "AI-ассистент: тексты, идеи, разбор\n\n"
+    "📥 <a href=\"https://t.me/SaveAsVideoFreebot?start=ref_bufferposter\">SaveAsVideo</a> — "
+    "скачать видео из соцсетей для репоста\n\n"
+    "⭐ <a href=\"https://t.me/StarsCashFlowbot?start=ref_bufferposter\">StarsCashFlow</a> — "
+    "монетизация аудитории через Telegram Stars"
+)
+
+
+@dp.callback_query(F.data == "menu:ecosystem")
+async def cb_ecosystem(call: CallbackQuery):
+    if not is_me_cb(call):
+        return
+    await call.answer()
+    try:
+        await call.message.edit_text(
+            ECOSYSTEM_TEXT, reply_markup=kb([back_to_menu_row()]),
+            parse_mode="HTML", disable_web_page_preview=True,
+        )
+    except Exception:
+        await call.message.answer(
+            ECOSYSTEM_TEXT, reply_markup=kb([back_to_menu_row()]),
+            parse_mode="HTML", disable_web_page_preview=True,
+        )
 
 
 @dp.callback_query(F.data == "bq:noop")
