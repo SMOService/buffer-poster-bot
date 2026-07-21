@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-07-21
+
+### Security
+
+- **aiohttp 3.13.4 → 3.14.2** — closes all 11 open Dependabot alerts (HTTP parser bypass, websocket memory-limit bypass, pipelined-request queue, compressed-body bypass, cross-origin redirect with per-request cookies, deserialization of untrusted data, DigestAuth cross-origin credentials, CRLF injection in multipart headers, TLS hostname override, unclosed payload resources, host-only→domain cookies).
+- **aiogram 3.28.2 → 3.30.0** — required for the aiohttp bump (3.28.x pins `aiohttp<3.14`); no code changes needed.
+
 ## [3.0.0] — 2026-07-20
 
 Major release: **video posts on Binance Square** + reliability hardening that shipped in the upstream production bot since 2.0.0.

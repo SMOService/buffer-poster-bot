@@ -3,7 +3,7 @@
 [![CI](https://github.com/SMOService/buffer-poster-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/SMOService/buffer-poster-bot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![aiogram 3.28](https://img.shields.io/badge/aiogram-3.28-blueviolet)](https://docs.aiogram.dev/)
+[![aiogram 3.30](https://img.shields.io/badge/aiogram-3.30-blueviolet)](https://docs.aiogram.dev/)
 
 > Self-hosted Telegram bot that turns forwarded messages into scheduled cross-posts across **Buffer** (X, LinkedIn, Threads, Bluesky, Mastodon, Facebook, Instagram, …) and **Binance Square** — with randomised scheduling so a single batch fills weeks of content. Photos, albums, **video**, inline menu, full CRUD over the queue, publication journal.
 
