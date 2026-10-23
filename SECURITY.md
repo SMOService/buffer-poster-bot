@@ -11,7 +11,7 @@ Only the latest minor release on `main` receives fixes. Older tags are kept for 
 
 ## Reporting a vulnerability
 
-**Do not open a public GitHub issue.** Email **support@smoservice.media** with:
+**Do not open a public GitHub issue.** Use **Security → Report a vulnerability** on GitHub with:
 
 - A description of the issue and its impact
 - Reproduction steps (a minimal proof of concept is ideal)
